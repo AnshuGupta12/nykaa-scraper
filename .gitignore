@@ -3,5 +3,6 @@ __pycache__/
 *.py[cod]
 .env
 nykaa_*.csv
+attribution_*.csv
 .pytest_cache/
 .vscode/

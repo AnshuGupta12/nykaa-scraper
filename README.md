@@ -146,3 +146,67 @@ The parser should be tested with saved HTML fixtures. Contract tests should veri
 ## Responsible Operation
 
 Only collect data that is permitted by the source website's terms, robots policy, and applicable legal requirements. Keep request rates low, cache results, identify the client where appropriate, and stop when the source indicates that automated access is not allowed.
+
+## Google Ads Attribution Reconciliation
+
+`attribution.py` compares the campaign stored by the order system with the campaign selected from a customer's Google Ads touchpoint journey. It is deliberately separate from the Nykaa scraper because attribution is a warehouse reconciliation problem, not a page-fetching problem.
+
+### Input contract
+
+The order system export must contain:
+
+```text
+order_id,order_campaign_id
+```
+
+The BigQuery journey export must contain one row per touchpoint:
+
+```text
+order_id,campaign_id,touchpoint_time
+```
+
+The production query should join Google Ads touchpoints to orders using a governed conversion ID, click ID, or analytics user/session mapping. Do not join on email or other raw personal data unless the data-processing agreement explicitly permits it.
+
+### Run locally with sample data
+
+```powershell
+python attribution.py `
+  --orders examples/orders.csv `
+  --touchpoints examples/google_ads_touchpoints.csv `
+  --rule last_click `
+  --output attribution_mismatches.csv
+```
+
+The default `last_click` rule compares the order-system campaign with the final Google Ads campaign before conversion. Use `--rule first_click` when that is the agreed business definition. Every mismatch retains touchpoint count, first campaign, last campaign, and conversion time so the result is auditable.
+
+### BigQuery production query shape
+
+The exact Google Ads transfer schema varies by account and export configuration. Keep the source-specific SQL in a versioned query file and normalize it to the input contract above:
+
+```sql
+SELECT
+  conversion.order_id,
+  ads.campaign_id,
+  ads.touchpoint_time
+FROM `project.google_ads.touchpoints` AS ads
+JOIN `project.analytics.conversions` AS conversion
+  ON conversion.gclid = ads.gclid
+WHERE ads.touchpoint_time <= conversion.conversion_time
+```
+
+Then load the result with `read_bigquery(project, query)` and pass it to `find_mismatches(orders, touchpoints, rule)`. In production, write the normalized result to a partitioned BigQuery table rather than CSV.
+
+### Scalable attribution architecture
+
+```mermaid
+flowchart LR
+    A[Order DB CDC or Daily Export] --> C[Warehouse Staging]
+    B[Google Ads BigQuery Export] --> C
+    C --> D[Identity and Conversion Join]
+    D --> E[Touchpoint Attribution Model]
+    E --> F[Campaign Mismatch Table]
+    F --> G[Dashboard and Alert]
+    F --> H[Marketing Spend Reconciliation]
+```
+
+For scale, run this as an incremental scheduled query or dbt model partitioned by conversion date. Deduplicate touchpoints by click ID, keep late-arriving events within a reprocessing window, and use a stable `order_id` plus `conversion_date` as the reconciliation key. Add data-quality checks for missing joins, duplicate orders, invalid campaign IDs, timezone drift, and orders with no eligible touchpoint.
